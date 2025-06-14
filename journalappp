@@ -1,0 +1,550 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { FileText, Download, Loader, UploadCloud, ChevronRight, XCircle, Lightbulb, Globe } from 'lucide-react';
+
+// Make sure to export your main component as default
+export default function App() {
+  const [prompt, setPrompt] = useState('');
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [generatedContent, setGeneratedContent] = useState(''); // Stores raw Markdown
+  const [loading, setLoading] = useState(false); // Overall loading for paper text
+  const [error, setError] = useState('');
+  const [showDisclaimer, setShowDisclaimer] = useState(true);
+  const [enableWebResearch, setEnableWebResearch] = useState(false);
+  const [loadingLibraries, setLoadingLibraries] = useState(true); // New state for script loading
+
+  const contentDisplayRef = useRef(null); // Ref for the content display div
+
+  // Firestore setup (not used for this specific request, but kept for boilerplate consistency)
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+  const firebaseConfig = typeof _firebase_config !== 'undefined' ? JSON.parse(_firebase_config) : null;
+  const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+  // Function to handle file uploads
+  const handleFileUpload = (event) => {
+    const files = Array.from(event.target.files);
+    const newUploadedFiles = [];
+    files.forEach(file => {
+      newUploadedFiles.push(file);
+    });
+    setUploadedFiles(prev => [...prev, ...newUploadedFiles]);
+    setError('');
+  };
+
+  // Function to remove an uploaded file
+  const removeFile = (fileName) => {
+    setUploadedFiles(uploadedFiles.filter(file => file.name !== fileName));
+  };
+
+  // Function to render a simple SVG bar chart
+  const renderBarChart = (title, data) => {
+    if (!data || data.length === 0) return '';
+
+    const values = data.map(d => d.value);
+    const labels = data.map(d => d.label);
+
+    const chartWidth = 400;
+    const chartHeight = 250;
+    const padding = 30;
+    const barWidth = (chartWidth / data.length) * 0.7; // Adjusted bar width for better spacing
+    const maxVal = Math.max(...values);
+    const scaleY = (chartHeight - 2 * padding) / maxVal;
+
+    return `
+      <div class="flex flex-col items-center mb-4">
+        <h3 class="text-xl font-semibold mb-2 text-gray-800">${title}</h3>
+        <svg width="${chartWidth}" height="${chartHeight}" viewBox="0 0 ${chartWidth} ${chartHeight}" class="bg-white rounded-lg shadow-md border border-gray-200">
+          <rect x="${padding}" y="${chartHeight - padding}" width="${chartWidth - 2 * padding}" height="1" fill="#ccc" />
+          <rect y="${padding}" x="${padding}" width="1" height="${chartHeight - 2 * padding}" fill="#ccc" />
+          ${data.map((d, i) => {
+            const barHeight = d.value * scaleY;
+            const x = padding + (i * (chartWidth - 2 * padding) / data.length) + (barWidth * 0.15); // Adjusted x to center bars
+            const y = chartHeight - padding - barHeight;
+            return `
+              <rect x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" fill="#6366F1" rx="4" ry="4" />
+              <text x="${x + barWidth / 2}" y="${chartHeight - padding + 15}" text-anchor="middle" fill="#555" font-size="12">${d.label}</text>
+              <text x="${x + barWidth / 2}" y="${y - 5}" text-anchor="middle" fill="#333" font-size="12">${d.value}</text>
+            `;
+          }).join('')}
+        </svg>
+      </div>
+    `;
+  };
+
+  // Function to convert HTML content to PDF
+  const generatePdf = async () => {
+    if (!generatedContent) {
+      setError('No content to download. Please generate a paper first.');
+      return;
+    }
+
+    if (typeof window.html2pdf === 'undefined') {
+      setError('PDF generation library not loaded. Please try refreshing the page.');
+      return;
+    }
+
+    setLoading(true); // Use main loading for PDF generation
+    setError('');
+
+    // Adding a small delay to ensure all dynamic content (like SVGs and images) are fully rendered
+    setTimeout(async () => {
+      // Ensure the content in the display div is fully rendered with SVGs
+      const elementToPrint = contentDisplayRef.current.cloneNode(true);
+
+      const opt = {
+        margin: 1,
+        filename: 'generated_journal_paper.pdf',
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 4, useCORS: true }, // Increased scale for better resolution
+        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+      };
+
+      try {
+        await window.html2pdf().set(opt).from(elementToPrint).save();
+      } catch (err) {
+        console.error('Error generating PDF:', err);
+        setError('Failed to generate PDF. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    }, 500); // Increased delay to 500ms for images to load
+  };
+
+  // Function to read and extract text from a file (DOCX, PDF, TXT, MD)
+  const readFileAsText = async (file) => {
+    return new Promise((resolve) => {
+      if (file.type.startsWith('text/') || file.name.endsWith('.md')) {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = () => {
+          console.warn(Could not read text file: ${file.name});
+          resolve('');
+        };
+        reader.readAsText(file);
+      } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.name.endsWith('.docx')) {
+        // Handle DOCX using mammoth.js
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            if (window.mammoth) {
+              const arrayBuffer = e.target.result;
+              const result = await window.mammoth.extractRawText({ arrayBuffer: arrayBuffer });
+              resolve(result.value);
+            } else {
+              console.warn('mammoth.js not loaded for DOCX processing.');
+              resolve('');
+            }
+          } catch (err) {
+            console.warn(Could not extract text from DOCX file: ${file.name}, err);
+            resolve('');
+          }
+        };
+        reader.onerror = () => {
+          console.warn(Could not read DOCX file: ${file.name});
+          resolve('');
+        };
+        reader.readAsArrayBuffer(file);
+      } else if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        // Handle PDF using pdf.js
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            if (window.pdfjsLib) {
+              // Set up the worker source
+              window.pdfjsLib.GlobalWorkerOptions.workerSrc = https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${window.pdfjsLib.version}/pdf.worker.min.js;
+
+              const arrayBuffer = e.target.result;
+              const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+              let fullText = '';
+              for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                fullText += textContent.items.map(s => s.str).join(' ') + '\n';
+              }
+              resolve(fullText);
+            } else {
+              console.warn('pdf.js not loaded for PDF processing.');
+              resolve('');
+            }
+          } catch (err) {
+            console.warn(Could not extract text from PDF file: ${file.name}, err);
+            resolve('');
+          }
+        };
+        reader.onerror = () => {
+          console.warn(Could not read PDF file: ${file.name});
+          resolve('');
+        };
+        reader.readAsArrayBuffer(file);
+      } else {
+        // Fallback for other file types or unreadable ones
+        console.warn(Unsupported file type for text extraction: ${file.name});
+        resolve('');
+      }
+    });
+  };
+
+  // Function to handle paper generation using the LLM
+  const generatePaper = async () => {
+    if (!prompt.trim()) {
+      setError('Please enter a prompt to generate the paper.');
+      return;
+    }
+
+    setLoading(true); // Main loading for text generation
+    setError(''); // Clear any previous errors
+    setGeneratedContent(''); // Clear previous content
+
+    let combinedPrompt = `You are an expert academic writer, tasked with generating a comprehensive journal paper. Adhere strictly to a formal, objective, and scholarly tone. The paper should be well-structured with standard academic sections.
+
+Instructions based on user prompt: ${prompt}\n\n`;
+
+    if (enableWebResearch) {
+      combinedPrompt += \n\n**Perform a conceptual "deep web research" using your training data to gather comprehensive, relevant, and up-to-date information on the topic. Incorporate facts, figures, and concepts that would typically be found through thorough online investigation.**\n\n;
+    }
+
+    const fileContentsPromises = uploadedFiles.map(file => readFileAsText(file)); // Use the new function
+
+    try {
+      const fileContents = await Promise.all(fileContentsPromises);
+      const readableFileContents = fileContents.filter(content => content.length > 0);
+
+      if (readableFileContents.length > 0) {
+        combinedPrompt += "\n\n--- Content from Uploaded Files (primarily use this information for the paper) ---\n";
+        readableFileContents.forEach((content, index) => {
+          combinedPrompt += \n--- File Content ${index + 1} ---\n${content}\n;
+        });
+        combinedPrompt += "\n--------------------------------------------\n";
+      } else if (uploadedFiles.length > 0) {
+        combinedPrompt += "\n\nNote: No readable text content was extracted from the uploaded files, or only unreadable file types were uploaded. The paper will be generated based solely on the prompt.\n";
+      }
+
+      // Updated prompt instructions for AI to include tables and graphs explicitly (removed image generation instructions)
+      combinedPrompt += `\n\n*FORMATTING AND CONTENT GUIDELINES FOR JOURNAL PAPER:*
+1.  *Structure:* Follow standard academic sections (e.g., Abstract, Introduction, Literature Review/Background, Methodology, Results, Discussion, Conclusion, References). Use Markdown headings (e.g., # for main title, ## for sections, ### for subsections).
+2.  *Language:* Maintain a formal, objective, and scholarly tone. Avoid colloquialisms or informal language.
+3.  *Equations/Formulas:* For any mathematical or scientific notation, use *LaTeX format* enclosed in '$' for inline equations and '$$' for display equations. Example: $E=mc^2$ or $$x = {-b \\pm \\sqrt{b^2-4ac} \\over 2a}$$.
+4.  *Visual Elements (If Applicable):*
+    * *Data Tables:* Use standard Markdown table syntax (e.g., | Header 1 | Header 2 |\\n|---|---|\\n| Data 1 | Data 2 |).
+    * *Simple Bar Graphs:* Include simple bar graphs only if the data supports it. Use the following custom format for hypothetical data:
+        \\\`
+        GRAPH_START: [Title of Bar Chart]
+        [Label 1]: [Value 1]
+        [Label 2]: [Value 2]
+        [Label N]: [Value N]
+        GRAPH_END
+        \\\`
+        Ensure data is plausible and relevant.
+5.  *Originality & Detection:* Ensure all generated content (text, graph data, table data) is *original* and not identifiable as plagiarized or AI-generated. Focus solely on producing unique academic content. Do not include phrases like 'AI generated' or similar disclaimers within the paper content.
+6.  *References:* Conclude with a "References" section. You can mention theoretical sources or types of studies, and for any specific factual claims, use placeholder bracketed numbers like '[1]', '[2]', etc., to indicate where references would typically be. Do not generate actual citations or a bibliography with specific formats, as that is beyond the scope of this tool.`;
+
+
+      let chatHistory = [];
+      chatHistory.push({ role: "user", parts: [{ text: combinedPrompt }] });
+      const payload = { contents: chatHistory };
+      const apiKey = ""; // Canvas will provide this at runtime if empty
+      const apiUrl = https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey};
+
+      // Added console log for debugging API key issue
+      console.log("Using API Key for Gemini 2.0 Flash (generatePaper):", apiKey ? "Provided (not empty)" : "Empty (Canvas expected to provide)");
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage = API error: ${response.status} ${response.statusText};
+        if (response.status === 401) {
+            errorMessage = Authentication Error (${response.status}): Failed to generate paper content. Your API key is likely invalid or missing permissions for Gemini 2.0 Flash.;
+        }
+        if (errorText) {
+            errorMessage += . Details: ${errorText};
+        }
+        throw new Error(errorMessage);
+      }
+
+      let result;
+      try {
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          result = await response.json();
+        } else {
+          const rawText = await response.text();
+          throw new Error(API response was not JSON. Content-Type: ${contentType}. Raw response: ${rawText});
+        }
+      } catch (jsonParseError) {
+        console.error('JSON parse error:', jsonParseError);
+        const rawText = await response.text();
+        throw new Error(Failed to parse API response as JSON. Error: ${jsonParseError.message}. Raw response: ${rawText});
+      }
+
+
+      if (result.candidates && result.candidates.length > 0 &&
+        result.candidates[0].content && result.candidates[0].content.parts &&
+        result.candidates[0].content.parts.length > 0) {
+        let text = result.candidates[0].content.parts[0].text;
+        setGeneratedContent(text);
+      } else {
+        setError('Failed to generate paper: No content received from AI.');
+      }
+    } catch (err) {
+      console.error('Error during paper generation:', err);
+      let userFriendlyError = err.message;
+      if (userFriendlyError.includes('401 Unauthorized') || userFriendlyError.includes('Authentication Error')) {
+        userFriendlyError = Authentication Error: Failed to generate paper content. This is likely due to an invalid API key or incorrect permissions in the environment. Please ensure your API key for Gemini 2.0 Flash is correctly configured and has access.;
+      }
+      setError(An error occurred: ${userFriendlyError}. Please check your prompt and try again.);
+    } finally {
+      setLoading(false); // Turn off main loading
+    }
+  };
+
+  // Effect to load marked.js, html2pdf.js, mammoth.js, and pdf.js
+  useEffect(() => {
+    const loadScript = (src, id) => {
+      return new Promise((resolve, reject) => {
+        if (document.getElementById(id)) {
+          resolve();
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.id = id;
+        script.onload = () => {
+          console.log(Script loaded: ${id});
+          resolve();
+        };
+        script.onerror = () => {
+          console.error(Failed to load script: ${id} from ${src});
+          reject(new Error(Failed to load script: ${src})); // More specific error message
+        };
+        document.head.appendChild(script);
+      });
+    };
+
+    // Use Promise.allSettled to allow all scripts to attempt loading,
+    // even if one fails, so we can report all failures
+    Promise.allSettled([
+      loadScript('https://cdn.jsdelivr.net/npm/marked/marked.min.js', 'marked-script'),
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js', 'html2pdf-script'),
+      // Changed CDN for mammoth.js for potential robustness
+      loadScript('https://unpkg.com/mammoth@1.4.15/mammoth.browser.min.js', 'mammoth-script'),
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js', 'pdfjs-script')
+    ]).then(results => {
+      const failedScripts = results.filter(result => result.status === 'rejected');
+      if (failedScripts.length > 0) {
+        const errorMessages = failedScripts.map(result => result.reason.message).join('; ');
+        console.error("Failed to load necessary scripts:", errorMessages);
+        setError(Failed to load required libraries: ${errorMessages}. Please refresh the page.);
+      } else {
+        setLoadingLibraries(false); // All scripts loaded successfully
+      }
+    }).catch(err => {
+      // This catch block will only run if Promise.allSettled itself throws, which is unlikely.
+      // The individual script errors are handled within the .then(results) block.
+      console.error("Unexpected error during script loading Promise.allSettled:", err);
+      setError(An unexpected error occurred during library loading: ${err.message}. Please refresh the page.);
+    });
+  }, []);
+
+  // Effect to process and render custom graph blocks after content is generated
+  useEffect(() => {
+    // Only re-render if generatedContent actually changed and ref is available and libraries are loaded
+    if (generatedContent && contentDisplayRef.current && !loadingLibraries) {
+      let contentHtml = marked.parse(generatedContent);
+
+      // Find and replace custom graph blocks
+      const graphBlocksRegex = /\s*GRAPH_START:([^\n]+?)\n([\s\S]+?)GRAPH_END\s*/g;
+      let match;
+      let processedHtml = contentHtml; // Use a new variable to build the processed HTML
+
+      // Reset regex lastIndex before using in a loop
+    graphBlocksRegex.lastIndex = 0;
+
+      while ((match = graphBlocksRegex.exec(contentHtml)) !== null) {
+        const fullBlock = match[0];
+        const title = match[1].trim();
+        const dataLines = match[2].trim().split('\n');
+
+        const data = dataLines.map(line => {
+          const parts = line.split(':');
+          return { label: parts[0].trim(), value: parseFloat(parts[1].trim()) || 0 };
+        }).filter(d => d.label && d.value !== undefined);
+
+        const svgChart = renderBarChart(title, data);
+        // Replace the original Markdown code block with the SVG HTML
+        processedHtml = processedHtml.replace(fullBlock, svgChart);
+      }
+
+      contentDisplayRef.current.innerHTML = processedHtml; // Set the final HTML to the ref
+    }
+  }, [generatedContent, loadingLibraries]); // Re-run when generatedContent or loadingLibraries changes
+
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-100 to-blue-100 p-4 font-inter text-gray-800">
+      <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-2xl p-6 sm:p-8 space-y-8 border-t-4 border-purple-500">
+
+        <h1 className="text-4xl font-extrabold text-center text-purple-700 mb-6 flex items-center justify-center gap-3">
+          <FileText className="w-10 h-10 text-blue-500" />
+          AI Journal Paper Generator
+        </h1>
+
+        {showDisclaimer && (
+          <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 text-yellow-800 flex items-start space-x-3 shadow-md">
+            <Lightbulb className="w-6 h-6 flex-shrink-0 mt-1 text-yellow-600" />
+            <div>
+              <h3 className="font-semibold text-lg mb-1">Important Disclaimer:</h3>
+              <p className="text-sm">
+                This tool uses AI to generate content. While it strives for originality and adheres to your instructions,
+                it cannot guarantee that the generated text will bypass all AI detection tools or be entirely free
+                from unintentional similarities with existing works.
+                <br /><strong className="text-yellow-900">Always review and revise the output carefully to ensure academic integrity and originality.</strong>
+                <br />File uploads now accept all file types, but <strong className="text-yellow-900">only content from .txt, .md, .pdf, and .docx files will be processed by the AI for inspiration.</strong>
+                <br />When "Enable Web Research" is checked, the AI model will simulate deep web research by leveraging its extensive training data. It does not perform live web searches.
+                <br />Generated papers can be downloaded as *PDF files. The AI will now attempt to include **data tables, and **simple SVG bar graphs* based on your prompt's descriptions and data. Please note that the AI will follow your prompt's instructions for structure and conceptual design, but it cannot replicate the exact visual layout or formatting from complex document templates (like those in .docx or .pdf files).
+              </p>
+              <button
+                onClick={() => setShowDisclaimer(false)}
+                className="mt-3 px-4 py-2 bg-yellow-600 text-white rounded-md text-sm font-medium hover:bg-yellow-700 transition-colors focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-opacity-50"
+              >
+                Got It! <ChevronRight className="inline-block w-4 h-4 ml-1" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 p-4 rounded-lg border border-red-200 text-red-800 flex items-center space-x-2 shadow-md">
+            <XCircle className="w-5 h-5 text-red-500" />
+            <p className="font-medium">{error}</p>
+          </div>
+        )}
+
+        {loadingLibraries && (
+          <div className="flex items-center justify-center p-4 bg-blue-100 rounded-lg text-blue-800 shadow-md">
+            <Loader className="animate-spin w-5 h-5 mr-3" />
+            <p>Loading essential libraries for file processing and PDF generation...</p>
+          </div>
+        )}
+
+        {/* Prompt Input Section */}
+        <div className="space-y-4">
+          <label htmlFor="prompt" className="block text-lg font-semibold text-gray-700">
+            Prompt for Journal Paper:
+          </label>
+          <textarea
+            id="prompt"
+            className="w-full p-4 rounded-lg border-2 border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 resize-y min-h-[150px] shadow-sm text-base"
+            placeholder="E.g., Write a research paper on 'The Impact of Quantum Computing on Cryptography' covering its principles, current advancements, potential threats, and future outlook. Structure it with an abstract, introduction, methods, results, discussion, and conclusion. Add a relevant bar chart illustrating hypothetical data and a conceptual image."
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows="7"
+            disabled={loadingLibraries} // Disable input while loading libraries
+          ></textarea>
+        </div>
+
+        {/* Web Research Toggle */}
+        <div className="flex items-center gap-2 mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200 shadow-sm">
+          <input
+            type="checkbox"
+            id="enableWebResearch"
+            checked={enableWebResearch}
+            onChange={(e) => setEnableWebResearch(e.target.checked)}
+            className="h-5 w-5 text-blue-600 rounded focus:ring-blue-500 border-gray-300"
+            disabled={loadingLibraries} // Disable input while loading libraries
+          />
+          <label htmlFor="enableWebResearch" className="text-lg font-semibold text-blue-700 flex items-center gap-2 cursor-pointer">
+            <Globe className="w-6 h-6" /> Enable Web Research (AI Simulation)
+          </label>
+        </div>
+
+
+        {/* File Upload Section */}
+        <div className="space-y-4">
+          <label className="block text-lg font-semibold text-gray-700">
+            Upload Example Files (Optional):
+          </label>
+          <div className="flex flex-col sm:flex-row items-center justify-center p-6 border-2 border-dashed border-blue-400 rounded-lg bg-blue-50 hover:bg-blue-100 transition-colors cursor-pointer">
+            <input
+              type="file"
+              multiple
+              onChange={handleFileUpload}
+              className="hidden"
+              id="file-upload"
+              accept=".txt,.md,.pdf,.docx" // Accept text, markdown, pdf, and docx files
+              disabled={loadingLibraries} // Disable input while loading libraries
+            />
+            <label htmlFor="file-upload" className={flex flex-col items-center cursor-pointer text-blue-700 ${loadingLibraries ? 'opacity-50 cursor-not-allowed' : ''}}>
+              <UploadCloud className="w-12 h-12 mb-3" />
+              <span className="text-center font-medium">Drag & Drop files here or click to browse</span>
+              <span className="text-sm text-blue-500 mt-1">(Supports .txt, .md, .pdf, .docx. Content from these files will be processed.)</span>
+            </label>
+          </div>
+          {uploadedFiles.length > 0 && (
+            <div className="mt-4 border-t pt-4 border-gray-200">
+              <h3 className="text-md font-medium text-gray-600 mb-2">Uploaded Files:</h3>
+              <ul className="space-y-2">
+                {uploadedFiles.map((file, index) => (
+                  <li key={index} className="flex items-center justify-between bg-gray-50 p-3 rounded-md border border-gray-200 text-gray-700 text-sm">
+                    <span className="truncate pr-2">{file.name}</span>
+                    <button
+                      onClick={() => removeFile(file.name)}
+                      className="text-red-500 hover:text-red-700 transition-colors ml-2 flex-shrink-0"
+                      aria-label={Remove ${file.name}}
+                      disabled={loadingLibraries} // Disable button while loading libraries
+                    >
+                      <XCircle className="w-5 h-5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex flex-col sm:flex-row gap-4">
+          <button
+            onClick={generatePaper}
+            disabled={loading || loadingLibraries || !prompt.trim()} // Removed imageGenerating
+            className={flex-1 ${loading || loadingLibraries || !prompt.trim() ? 'bg-gray-400' : 'bg-purple-600 hover:bg-purple-700'} text-white py-3 px-6 rounded-lg text-lg font-bold transition-all duration-300 shadow-lg transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-50 flex items-center justify-center gap-2}
+          >
+            {loading ? ( // Simplified loading text
+              <>
+                <Loader className="animate-spin w-6 h-6" /> Generating Paper...
+              </>
+            ) : (
+              <>
+                <FileText className="w-6 h-6" /> Generate Paper
+              </>
+            )}
+          </button>
+          <button
+            onClick={generatePdf}
+            disabled={!generatedContent || loading || loadingLibraries} // Removed imageGenerating
+            className={flex-1 ${!generatedContent || loading || loadingLibraries ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'} text-white py-3 px-6 rounded-lg text-lg font-bold transition-all duration-300 shadow-lg transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 flex items-center justify-center gap-2}
+          >
+            <Download className="w-6 h-6" /> Download PDF
+          </button>
+        </div>
+
+        {/* Generated Content Display */}
+        {generatedContent && (
+          <div className="mt-8 pt-8 border-t-2 border-gray-200">
+            <h2 className="text-3xl font-bold text-purple-700 mb-6 text-center">Generated Journal Paper</h2>
+            <div
+              ref={contentDisplayRef}
+              className="prose prose-lg max-w-none text-gray-800 bg-gray-50 p-6 rounded-lg shadow-inner overflow-x-auto break-words"
+              // dangerouslySetInnerHTML is updated by the useEffect, not directly here
+            >
+              {/* Content will be set by the useEffect hook */}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
